@@ -16,8 +16,7 @@
     },
     "web": {
       "bundler": "metro",
-      "output": "single",
-      "favicon": "./assets/images/favicon.png"
+      "output": "single"
     },
     "plugins": [
       "expo-router",
@@ -26,8 +25,8 @@
       [
         "react-native-google-mobile-ads",
         {
-          "androidAppId": "ca-app-pub-YOUR_ANDROID_APP_ID~YOUR_ANDROID_APP_ID",
-          "iosAppId": "ca-app-pub-YOUR_IOS_APP_ID~YOUR_IOS_APP_ID"
+          "androidAppId": "ca-app-pub-2245784892914119~2481627053",
+          "iosAppId": "ca-app-pub-2245784892914119~7199094089"
         }
       ]
     ],
