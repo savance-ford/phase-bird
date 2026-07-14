@@ -194,11 +194,17 @@ export function useMockRewardedContinueAd() {
       isShowing: isShowingRef.current,
     });
 
-    if (!ad || !isLoadedRef.current || isShowingRef.current) {
+    if (
+      !ad ||
+      !isLoadedRef.current ||
+      isShowingRef.current ||
+      showResolverRef.current
+    ) {
       return 'not-ready';
     }
 
     earnedRewardRef.current = false;
+    updateShowing(true);
     setLastError(null);
 
     return new Promise<RewardedAdShowResult>(resolve => {
