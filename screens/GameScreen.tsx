@@ -54,6 +54,14 @@ interface Props {
   onMenu: () => void;
 }
 
+function useLazyRef<T>(createValue: () => T): React.RefObject<T> {
+  const ref = useRef<T | null>(null);
+  if (ref.current === null) {
+    ref.current = createValue();
+  }
+  return ref as React.RefObject<T>;
+}
+
 // ─── Display state (synced into React state each frame) ───────────────────────
 interface DisplayState {
   birdY: number;
@@ -81,7 +89,7 @@ export function GameScreen({ onMenu }: Props) {
   const rewardedContinueAd = useMockRewardedContinueAd();
 
   // ── Mutable game state in a ref — never triggers re-renders ───────────────
-  const stateRef = useRef<GameState>(createInitialState());
+  const stateRef = useLazyRef(createInitialState);
 
   // ── Display state — synced from stateRef each frame ───────────────────────
   const [display, setDisplay] = useState<DisplayState>({
@@ -227,7 +235,7 @@ export function GameScreen({ onMenu }: Props) {
     }
 
     stateRef.current = { ...stateRef.current, bird: flap(stateRef.current.bird) };
-  }, [syncDisplayFromState]);
+  }, [stateRef, syncDisplayFromState]);
 
   const handleRightTap = useCallback(() => {
     const s = stateRef.current;
@@ -252,7 +260,7 @@ export function GameScreen({ onMenu }: Props) {
         color,
       },
     ]);
-  }, [haptics]);
+  }, [haptics, stateRef]);
 
   const handleRewardedContinue = useCallback(async () => {
     if (continueUsedThisRun || rewardedContinueAd.isShowing) return;
@@ -296,7 +304,7 @@ export function GameScreen({ onMenu }: Props) {
     ]);
     syncDisplayFromState(revived);
     setLoopRunning(true);
-  }, [continueUsedThisRun, haptics, overlayAnim, rewardedContinueAd, syncDisplayFromState]);
+  }, [continueUsedThisRun, haptics, overlayAnim, rewardedContinueAd, stateRef, syncDisplayFromState]);
 
   // ── Restart / menu ─────────────────────────────────────────────────────────
   const handleRestart = useCallback(() => {
@@ -312,7 +320,7 @@ export function GameScreen({ onMenu }: Props) {
     setLoopRunning(true);
 
     rewardedContinueAd.loadAd().catch(() => {});
-  }, [overlayAnim, rewardedContinueAd, syncDisplayFromState]);
+  }, [overlayAnim, rewardedContinueAd, stateRef, syncDisplayFromState]);
 
   const handleMenu = useCallback(() => {
     setLoopRunning(false);

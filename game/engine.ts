@@ -21,19 +21,16 @@ import {
 import { clamp, randomBetween } from '../utils/math';
 import { Bird, GameState, Obstacle, Phase } from './types';
 
-// Auto-incrementing id for obstacles
-let _nextId = 1;
-
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
 /** Fresh game state — call this when starting a new run */
 export function createInitialState(): GameState {
-  _nextId = 1;
   return {
     status: 'idle',
     score: 0,
     bird: { y: BIRD_START_Y, vy: 0, phase: 'blue' },
     obstacles: [],
+    nextObstacleId: 1,
     speed: SPEED_INIT,
     // Give the player a moment before the first obstacle appears
     spawnTimer: SPAWN_INTERVAL_INIT * 0.55,
@@ -59,7 +56,7 @@ export function switchPhase(bird: Bird): Bird {
  * Spawn a new obstacle at the right edge of the screen.
  * Gate height shrinks slightly as score increases for a gradual difficulty ramp.
  */
-function spawnObstacle(score: number): Obstacle {
+function spawnObstacle(score: number, id: number): Obstacle {
   // Make gates a bit narrower as the game progresses
   const gateH = randomBetween(
     GATE_H_MIN,
@@ -70,13 +67,25 @@ function spawnObstacle(score: number): Obstacle {
   const phase: Phase = Math.random() < 0.5 ? 'blue' : 'pink';
 
   return {
-    id: _nextId++,
+    id,
     x: OBS_SPAWN_X,
     gateTop: centre - gateH / 2,
     gateBot: centre + gateH / 2,
     phase,
     scored: false,
   };
+}
+
+function assertUniqueObstacleIds(obstacles: Obstacle[]): void {
+  if (!__DEV__) return;
+
+  const ids = new Set<number>();
+  for (const obstacle of obstacles) {
+    if (ids.has(obstacle.id)) {
+      throw new Error(`Duplicate obstacle id: ${obstacle.id}`);
+    }
+    ids.add(obstacle.id);
+  }
 }
 
 // ─── Collision detection ──────────────────────────────────────────────────────
@@ -176,11 +185,15 @@ export function tick(
   );
   let spawnTimer = state.spawnTimer + deltaMs;
   let obstacles = [...state.obstacles];
+  let nextObstacleId = state.nextObstacleId;
 
   if (spawnTimer >= spawnInterval) {
-    obstacles.push(spawnObstacle(state.score));
+    obstacles.push(spawnObstacle(state.score, nextObstacleId));
+    nextObstacleId++;
     spawnTimer = 0;
   }
+
+  assertUniqueObstacleIds(obstacles);
 
   // ── Move obstacles left ───────────────────────────────────────────────────
   obstacles = obstacles.map(o => ({ ...o, x: o.x - state.speed * dt }));
@@ -201,7 +214,15 @@ export function tick(
   for (const o of obstacles) {
     if (nextInvulnerableMs <= 0 && collidesWithObstacle(movedBird, o)) {
       return {
-        state: { ...state, bird: movedBird, obstacles, score, status: 'dead', invulnerableMs: 0 },
+        state: {
+          ...state,
+          bird: movedBird,
+          obstacles,
+          nextObstacleId,
+          score,
+          status: 'dead',
+          invulnerableMs: 0,
+        },
         events: [...events, 'died'],
       };
     }
@@ -218,6 +239,7 @@ export function tick(
       ...state,
       bird: movedBird,
       obstacles,
+      nextObstacleId,
       score,
       spawnTimer,
       speed: newSpeed,
