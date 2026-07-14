@@ -1,29 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  AdEventType,
+  RewardedAd,
+  RewardedAdEventType,
+  TestIds,
+} from 'react-native-google-mobile-ads';
 
-/**
- * Mock rewarded-ad adapter used until real AdMob integration is dropped in.
- *
- * Why this file exists:
- * - The game screen should already know how to ask for a rewarded continue.
- * - AdMob-specific code can later replace this hook without rewriting the UI.
- * - We intentionally simulate the async states a real ad SDK has: loading,
- *   loaded, showing, and unavailable.
- *
- * Swap path later:
- * - Keep the returned API the same.
- * - Replace loadAd/showAd internals with react-native-google-mobile-ads.
- * - See `ads/AD_MOB_SETUP.md` for the exact handoff notes and config checklist.
- * - See `ads/admobConfig.ts` for test IDs, production placeholders, and
- *   reminders about App IDs vs ad unit IDs.
- */
+export type RewardedAdShowResult =
+  | 'reward-earned'
+  | 'not-ready'
+  | 'dismissed'
+  | 'error';
 
-export type RewardedAdShowResult = 'reward-earned' | 'not-ready' | 'dismissed' | 'error';
-
-const MOCK_LOAD_DELAY_MS = 1100;
-const MOCK_SHOW_DELAY_MS = 1450;
-const MOCK_FILL_RATE = 0.85;
-
-const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const LOAD_TIMEOUT_MS = 10000;
 
 export function useMockRewardedContinueAd() {
   const [isLoading, setIsLoading] = useState(false);
@@ -32,53 +21,249 @@ export function useMockRewardedContinueAd() {
   const [lastError, setLastError] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
+  const adRef = useRef<RewardedAd | null>(null);
+  const cleanupListenersRef = useRef<(() => void) | null>(null);
+  const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    return () => {
-      mountedRef.current = false;
-    };
+  const loadPromiseRef = useRef<Promise<boolean> | null>(null);
+  const loadResolverRef = useRef<((value: boolean) => void) | null>(null);
+  const showResolverRef = useRef<((value: RewardedAdShowResult) => void) | null>(
+    null
+  );
+  const earnedRewardRef = useRef(false);
+
+  // Refs used for immediate, up-to-date values inside async callbacks.
+  const isLoadedRef = useRef(false);
+  const isShowingRef = useRef(false);
+
+  const updateLoaded = useCallback((value: boolean) => {
+    isLoadedRef.current = value;
+    setIsLoaded(value);
   }, []);
 
-  const loadAd = useCallback(async () => {
-    if (isLoading || isLoaded) return isLoaded;
+  const updateShowing = useCallback((value: boolean) => {
+    isShowingRef.current = value;
+    setIsShowing(value);
+  }, []);
+
+  const clearLoadTimeout = useCallback(() => {
+    if (loadTimeoutRef.current) {
+      clearTimeout(loadTimeoutRef.current);
+      loadTimeoutRef.current = null;
+    }
+  }, []);
+
+  const cleanupAd = useCallback(() => {
+    cleanupListenersRef.current?.();
+    cleanupListenersRef.current = null;
+    adRef.current = null;
+  }, []);
+
+  const finishLoad = useCallback(
+    (ok: boolean, message?: string) => {
+      if (!mountedRef.current) return;
+
+      clearLoadTimeout();
+      setIsLoading(false);
+      updateLoaded(ok);
+      setLastError(ok ? null : message ?? 'Rewarded ad unavailable.');
+
+      const resolver = loadResolverRef.current;
+      loadResolverRef.current = null;
+      loadPromiseRef.current = null;
+      resolver?.(ok);
+    },
+    [clearLoadTimeout, updateLoaded]
+  );
+
+  const createAd = useCallback(() => {
+    cleanupAd();
+
+    const ad = RewardedAd.createForAdRequest(TestIds.REWARDED, {
+      requestNonPersonalizedAdsOnly: true,
+    });
+
+    const unsubscribeLoaded = ad.addAdEventListener(
+      RewardedAdEventType.LOADED,
+      () => {
+        console.log('[AdMob] Rewarded LOADED');
+        finishLoad(true);
+      }
+    );
+
+    const unsubscribeEarned = ad.addAdEventListener(
+      RewardedAdEventType.EARNED_REWARD,
+      reward => {
+        console.log('[AdMob] EARNED_REWARD', reward);
+        earnedRewardRef.current = true;
+      }
+    );
+
+    const unsubscribeOpened = ad.addAdEventListener(AdEventType.OPENED, () => {
+      console.log('[AdMob] OPENED');
+      if (!mountedRef.current) return;
+      updateShowing(true);
+      setLastError(null);
+    });
+
+    const unsubscribeClosed = ad.addAdEventListener(AdEventType.CLOSED, () => {
+      console.log('[AdMob] CLOSED');
+      if (!mountedRef.current) return;
+
+      updateShowing(false);
+      updateLoaded(false);
+
+      const earned = earnedRewardRef.current;
+      earnedRewardRef.current = false;
+
+      const resolver = showResolverRef.current;
+      showResolverRef.current = null;
+      resolver?.(earned ? 'reward-earned' : 'dismissed');
+
+      cleanupAd();
+    });
+
+    const unsubscribeError = ad.addAdEventListener(AdEventType.ERROR, error => {
+      console.log('[AdMob] ERROR', error);
+      if (!mountedRef.current) return;
+
+      const message = error?.message ?? 'Rewarded ad failed.';
+
+      updateShowing(false);
+      updateLoaded(false);
+      setLastError(message);
+
+      if (showResolverRef.current) {
+        const resolver = showResolverRef.current;
+        showResolverRef.current = null;
+        resolver('error');
+      } else {
+        finishLoad(false, message);
+      }
+
+      cleanupAd();
+    });
+
+    cleanupListenersRef.current = () => {
+      unsubscribeLoaded();
+      unsubscribeEarned();
+      unsubscribeOpened();
+      unsubscribeClosed();
+      unsubscribeError();
+    };
+
+    adRef.current = ad;
+    return ad;
+  }, [cleanupAd, finishLoad, updateLoaded, updateShowing]);
+
+  const loadAd = useCallback((): Promise<boolean> => {
+    console.log('[AdMob] loadAd called', {
+      isLoaded: isLoadedRef.current,
+      isLoading,
+    });
+
+    if (isLoadedRef.current) return Promise.resolve(true);
+    if (loadPromiseRef.current) return loadPromiseRef.current;
+
+    const ad = adRef.current ?? createAd();
 
     setIsLoading(true);
     setLastError(null);
 
-    await wait(MOCK_LOAD_DELAY_MS);
+    loadPromiseRef.current = new Promise<boolean>(resolve => {
+      loadResolverRef.current = resolve;
 
-    const didFill = Math.random() < MOCK_FILL_RATE;
-    if (!mountedRef.current) return false;
+      loadTimeoutRef.current = setTimeout(() => {
+        console.log('[AdMob] load timeout');
+        finishLoad(false, 'Timed out loading test ad.');
+        cleanupAd();
+      }, LOAD_TIMEOUT_MS);
 
-    setIsLoading(false);
-    setIsLoaded(didFill);
-    setLastError(didFill ? null : 'No test ad was ready yet.');
+      ad.load();
+    });
 
-    return didFill;
-  }, [isLoaded, isLoading]);
+    return loadPromiseRef.current;
+  }, [cleanupAd, createAd, finishLoad, isLoading]);
 
   const showAd = useCallback(async (): Promise<RewardedAdShowResult> => {
-    if (!isLoaded || isShowing) return 'not-ready';
+    const ad = adRef.current;
 
-    setIsShowing(true);
+    console.log('[AdMob] showAd called', {
+      hasAd: !!ad,
+      isLoaded: isLoadedRef.current,
+      isShowing: isShowingRef.current,
+    });
+
+    if (
+      !ad ||
+      !isLoadedRef.current ||
+      isShowingRef.current ||
+      showResolverRef.current
+    ) {
+      return 'not-ready';
+    }
+
+    earnedRewardRef.current = false;
+    updateShowing(true);
     setLastError(null);
 
-    // Simulate the time a real rewarded video/playable would stay on screen.
-    await wait(MOCK_SHOW_DELAY_MS);
+    return new Promise<RewardedAdShowResult>(resolve => {
+      showResolverRef.current = resolve;
 
-    if (!mountedRef.current) return 'dismissed';
+      try {
+        Promise.resolve(ad.show()).catch(error => {
+          console.log('[AdMob] show failed', error);
 
-    setIsShowing(false);
-    setIsLoaded(false);
-    return 'reward-earned';
-  }, [isLoaded, isShowing]);
+          if (!mountedRef.current) {
+            resolve('error');
+            return;
+          }
+
+          updateShowing(false);
+          updateLoaded(false);
+          setLastError(error?.message ?? 'Rewarded ad failed to show.');
+          showResolverRef.current = null;
+          cleanupAd();
+          resolve('error');
+        });
+      } catch (error: any) {
+        console.log('[AdMob] show threw', error);
+        updateShowing(false);
+        updateLoaded(false);
+        setLastError(error?.message ?? 'Rewarded ad failed to show.');
+        showResolverRef.current = null;
+        cleanupAd();
+        resolve('error');
+      }
+    });
+  }, [cleanupAd, updateLoaded, updateShowing]);
 
   const resetForNextRun = useCallback(() => {
-    setIsLoading(false);
-    setIsLoaded(false);
-    setIsShowing(false);
-    setLastError(null);
-  }, []);
+    clearLoadTimeout();
+
+    loadResolverRef.current?.(false);
+    loadResolverRef.current = null;
+    loadPromiseRef.current = null;
+
+    showResolverRef.current = null;
+    earnedRewardRef.current = false;
+
+    cleanupAd();
+
+    if (mountedRef.current) {
+      setIsLoading(false);
+      updateLoaded(false);
+      updateShowing(false);
+      setLastError(null);
+    }
+  }, [cleanupAd, clearLoadTimeout, updateLoaded, updateShowing]);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      resetForNextRun();
+    };
+  }, [resetForNextRun]);
 
   return {
     isLoading,
