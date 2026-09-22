@@ -24,6 +24,7 @@ export interface GameState {
   score: number;
   bird: Bird;
   obstacles: Obstacle[];
+  nextObstacleId: number;
   speed: number;       // current obstacle speed px/s
   spawnTimer: number;  // ms elapsed since last spawn
   invulnerableMs: number; // brief grace window after rewarded revive
